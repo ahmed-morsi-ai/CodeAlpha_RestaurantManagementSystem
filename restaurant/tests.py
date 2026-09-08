@@ -3,6 +3,8 @@ from decimal import Decimal
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.utils import timezone
+from rest_framework import status
+from rest_framework.test import APITestCase
 
 from .models import (
     InventoryItem,
@@ -214,3 +216,64 @@ class OrderItemModelTests(TestCase):
         order.delete()
 
         self.assertFalse(OrderItem.objects.filter(pk=order_item.pk).exists())
+
+
+class MenuItemListAPITests(APITestCase):
+    def test_menu_list_returns_multiple_items(self):
+        MenuItem.objects.create(
+            name="Margherita Pizza",
+            description="Classic tomato and mozzarella pizza",
+            price=Decimal("12.50"),
+            is_available=True,
+        )
+        MenuItem.objects.create(
+            name="Pasta",
+            description="Creamy pasta",
+            price=Decimal("9.00"),
+            is_available=False,
+        )
+
+        response = self.client.get("/menu/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(response.data, list)
+        self.assertEqual(len(response.data), 2)
+
+        first_item = response.data[0]
+        self.assertEqual(
+            set(first_item.keys()),
+            {
+                "id",
+                "name",
+                "description",
+                "price",
+                "is_available",
+                "created_at",
+                "updated_at",
+            },
+        )
+        self.assertEqual(first_item["name"], "Margherita Pizza")
+        self.assertEqual(first_item["description"], "Classic tomato and mozzarella pizza")
+        self.assertEqual(first_item["price"], "12.50")
+        self.assertTrue(first_item["is_available"])
+
+    def test_menu_list_returns_empty_collection_when_no_items_exist(self):
+        response = self.client.get("/menu/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_menu_list_returns_all_items_without_filtering(self):
+        items = [
+            MenuItem.objects.create(name="Pizza", price=Decimal("12.50")),
+            MenuItem.objects.create(name="Salad", price=Decimal("6.00")),
+            MenuItem.objects.create(name="Soup", price=Decimal("5.00")),
+        ]
+
+        response = self.client.get("/menu/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            {item["id"] for item in response.data},
+            {item.id for item in items},
+        )
