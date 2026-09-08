@@ -1,8 +1,9 @@
 from datetime import timedelta
 
+from django.db import transaction
 from rest_framework import serializers
 
-from .models import MenuItem, Reservation
+from .models import MenuItem, Order, OrderItem, Reservation
 
 
 class MenuItemSerializer(serializers.ModelSerializer):
@@ -70,3 +71,70 @@ class ReservationSerializer(serializers.ModelSerializer):
                 )
 
         return attrs
+
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderItem
+        fields = [
+            "menu_item",
+            "quantity",
+            "unit_price",
+        ]
+        read_only_fields = ["unit_price"]
+
+    def validate_menu_item(self, value):
+        if not value.is_available:
+            raise serializers.ValidationError(
+                "This menu item is currently unavailable."
+            )
+        return value
+
+    def validate_quantity(self, value):
+        if value <= 0:
+            raise serializers.ValidationError(
+                "quantity must be greater than 0."
+            )
+        return value
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True)
+
+    class Meta:
+        model = Order
+        fields = [
+            "id",
+            "table",
+            "status",
+            "created_at",
+            "updated_at",
+            "items",
+        ]
+        read_only_fields = ["id", "status", "created_at", "updated_at"]
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError(
+                "At least one order item is required."
+            )
+        return value
+
+    def create(self, validated_data):
+        items_data = validated_data.pop("items")
+
+        with transaction.atomic():
+            order = Order.objects.create(**validated_data)
+            OrderItem.objects.bulk_create(
+                [
+                    OrderItem(
+                        order=order,
+                        menu_item=item_data["menu_item"],
+                        quantity=item_data["quantity"],
+                        unit_price=item_data["menu_item"].price,
+                    )
+                    for item_data in items_data
+                ]
+            )
+
+        return order

@@ -1,7 +1,11 @@
 from rest_framework.generics import CreateAPIView, ListAPIView
 
-from .models import MenuItem, Reservation
-from .serializers import MenuItemSerializer, ReservationSerializer
+from .models import MenuItem, Order, Reservation
+from .serializers import (
+    MenuItemSerializer,
+    OrderSerializer,
+    ReservationSerializer,
+)
 
 
 class MenuItemListView(ListAPIView):
@@ -12,3 +16,8 @@ class MenuItemListView(ListAPIView):
 class ReservationCreateView(CreateAPIView):
     queryset = Reservation.objects.all()
     serializer_class = ReservationSerializer
+
+
+class OrderCreateView(CreateAPIView):
+    queryset = Order.objects.all()
+    serializer_class = OrderSerializer
