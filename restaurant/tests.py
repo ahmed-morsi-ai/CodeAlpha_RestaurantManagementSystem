@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
+from django.db.models.deletion import ProtectedError
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
@@ -9,6 +10,7 @@ from rest_framework.test import APITestCase
 from .models import (
     InventoryItem,
     MenuItem,
+    MenuItemIngredient,
     Order,
     OrderItem,
     Reservation,
@@ -660,3 +662,155 @@ class OrderCreateAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Order.objects.count(), 0)
         self.assertEqual(OrderItem.objects.count(), 0)
+
+class MenuItemIngredientModelTests(TestCase):
+    def setUp(self):
+        self.menu_item = MenuItem.objects.create(
+            name="Margherita Pizza",
+            price=Decimal("12.50"),
+        )
+        self.second_menu_item = MenuItem.objects.create(
+            name="Pasta",
+            price=Decimal("9.00"),
+        )
+        self.tomatoes = InventoryItem.objects.create(
+            name="Tomatoes",
+            quantity=Decimal("25.50"),
+            unit="kg",
+            reorder_level=Decimal("5.00"),
+        )
+        self.cheese = InventoryItem.objects.create(
+            name="Cheese",
+            quantity=Decimal("10.00"),
+            unit="kg",
+            reorder_level=Decimal("2.00"),
+        )
+
+    def test_menu_item_can_have_one_inventory_requirement(self):
+        requirement = MenuItemIngredient.objects.create(
+            menu_item=self.menu_item,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.15"),
+        )
+
+        saved_requirement = MenuItemIngredient.objects.get(pk=requirement.pk)
+
+        self.assertEqual(saved_requirement.menu_item, self.menu_item)
+        self.assertEqual(saved_requirement.inventory_item, self.tomatoes)
+        self.assertEqual(
+            saved_requirement.quantity_required,
+            Decimal("0.15"),
+        )
+        self.assertIn(
+            saved_requirement,
+            self.menu_item.inventory_requirements.all(),
+        )
+        self.assertIn(
+            saved_requirement,
+            self.tomatoes.menu_item_requirements.all(),
+        )
+
+    def test_menu_item_can_have_multiple_inventory_requirements(self):
+        MenuItemIngredient.objects.create(
+            menu_item=self.menu_item,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.15"),
+        )
+        MenuItemIngredient.objects.create(
+            menu_item=self.menu_item,
+            inventory_item=self.cheese,
+            quantity_required=Decimal("0.10"),
+        )
+
+        self.assertEqual(self.menu_item.inventory_requirements.count(), 2)
+        self.assertEqual(
+            set(
+                self.menu_item.inventory_requirements.values_list(
+                    "inventory_item_id",
+                    flat=True,
+                )
+            ),
+            {self.tomatoes.pk, self.cheese.pk},
+        )
+
+    def test_inventory_item_can_be_shared_by_multiple_menu_items(self):
+        first_requirement = MenuItemIngredient.objects.create(
+            menu_item=self.menu_item,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.15"),
+        )
+        second_requirement = MenuItemIngredient.objects.create(
+            menu_item=self.second_menu_item,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.20"),
+        )
+
+        self.assertEqual(first_requirement.inventory_item, self.tomatoes)
+        self.assertEqual(second_requirement.inventory_item, self.tomatoes)
+        self.assertEqual(
+            self.tomatoes.menu_item_requirements.count(),
+            2,
+        )
+
+    def test_duplicate_menu_item_inventory_mapping_is_rejected(self):
+        MenuItemIngredient.objects.create(
+            menu_item=self.menu_item,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.15"),
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                MenuItemIngredient.objects.create(
+                    menu_item=self.menu_item,
+                    inventory_item=self.tomatoes,
+                    quantity_required=Decimal("0.20"),
+                )
+
+    def test_zero_quantity_required_is_rejected(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                MenuItemIngredient.objects.create(
+                    menu_item=self.menu_item,
+                    inventory_item=self.tomatoes,
+                    quantity_required=Decimal("0.00"),
+                )
+
+    def test_negative_quantity_required_is_rejected(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                MenuItemIngredient.objects.create(
+                    menu_item=self.menu_item,
+                    inventory_item=self.tomatoes,
+                    quantity_required=Decimal("-0.10"),
+                )
+
+    def test_deleting_menu_item_cascades_to_inventory_requirements(self):
+        requirement = MenuItemIngredient.objects.create(
+            menu_item=self.menu_item,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.15"),
+        )
+
+        self.menu_item.delete()
+
+        self.assertFalse(
+            MenuItemIngredient.objects.filter(pk=requirement.pk).exists()
+        )
+        self.assertTrue(
+            InventoryItem.objects.filter(pk=self.tomatoes.pk).exists()
+        )
+
+    def test_deleting_inventory_item_is_protected(self):
+        MenuItemIngredient.objects.create(
+            menu_item=self.menu_item,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.15"),
+        )
+
+        with self.assertRaises(ProtectedError):
+            self.tomatoes.delete()
+
+        self.assertTrue(
+            InventoryItem.objects.filter(pk=self.tomatoes.pk).exists()
+        )

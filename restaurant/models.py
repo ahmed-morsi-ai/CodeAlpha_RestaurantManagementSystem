@@ -13,6 +13,42 @@ class MenuItem(models.Model):
         return self.name
 
 
+class MenuItemIngredient(models.Model):
+    menu_item = models.ForeignKey(
+        MenuItem,
+        on_delete=models.CASCADE,
+        related_name="inventory_requirements",
+    )
+    inventory_item = models.ForeignKey(
+        "InventoryItem",
+        on_delete=models.PROTECT,
+        related_name="menu_item_requirements",
+    )
+    quantity_required = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["menu_item", "inventory_item"],
+                name="unique_menu_item_inventory_requirement",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(quantity_required__gt=0),
+                name="positive_quantity_required",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.menu_item.name} requires "
+            f"{self.quantity_required} {self.inventory_item.unit} "
+            f"{self.inventory_item.name}"
+        )
+
+
 class RestaurantTable(models.Model):
     number = models.PositiveIntegerField(unique=True)
     capacity = models.PositiveIntegerField()
