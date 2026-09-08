@@ -277,3 +277,194 @@ class MenuItemListAPITests(APITestCase):
             {item["id"] for item in response.data},
             {item.id for item in items},
         )
+
+
+class ReservationCreateAPITests(APITestCase):
+    def setUp(self):
+        self.table = RestaurantTable.objects.create(
+            number=10,
+            capacity=4,
+        )
+        self.second_table = RestaurantTable.objects.create(
+            number=11,
+            capacity=4,
+        )
+        self.reserved_at = timezone.datetime(
+            2026,
+            9,
+            8,
+            18,
+            0,
+            tzinfo=timezone.get_current_timezone(),
+        )
+
+    def reservation_payload(self, **overrides):
+        payload = {
+            "table": self.table.pk,
+            "customer_name": "Ahmed",
+            "customer_phone": "01000000000",
+            "reserved_at": self.reserved_at.isoformat(),
+            "duration_minutes": 60,
+            "party_size": 2,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_successful_reservation_is_created(self):
+        response = self.client.post(
+            "/reservations/",
+            self.reservation_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Reservation.objects.count(), 1)
+
+        reservation = Reservation.objects.get()
+        self.assertEqual(reservation.table, self.table)
+        self.assertEqual(reservation.customer_name, "Ahmed")
+        self.assertEqual(reservation.duration_minutes, 60)
+        self.assertEqual(reservation.party_size, 2)
+        self.assertEqual(
+            response.data["table"],
+            self.table.pk,
+        )
+        self.assertEqual(response.data["duration_minutes"], 60)
+        self.assertEqual(response.data["status"], Reservation.Status.PENDING)
+
+    def test_overlapping_reservation_is_rejected(self):
+        Reservation.objects.create(
+            table=self.table,
+            customer_name="Existing Customer",
+            customer_phone="01000000001",
+            reserved_at=self.reserved_at,
+            duration_minutes=60,
+            party_size=2,
+        )
+
+        response = self.client.post(
+            "/reservations/",
+            self.reservation_payload(
+                customer_name="New Customer",
+                reserved_at=(
+                    self.reserved_at + timezone.timedelta(minutes=30)
+                ).isoformat(),
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("non_field_errors", response.data)
+        self.assertEqual(Reservation.objects.count(), 1)
+
+    def test_non_overlapping_reservation_is_accepted(self):
+        Reservation.objects.create(
+            table=self.table,
+            customer_name="Existing Customer",
+            customer_phone="01000000001",
+            reserved_at=self.reserved_at,
+            duration_minutes=60,
+            party_size=2,
+        )
+
+        response = self.client.post(
+            "/reservations/",
+            self.reservation_payload(
+                customer_name="New Customer",
+                reserved_at=(
+                    self.reserved_at + timezone.timedelta(minutes=120)
+                ).isoformat(),
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Reservation.objects.count(), 2)
+
+    def test_different_table_is_accepted_for_same_time(self):
+        Reservation.objects.create(
+            table=self.table,
+            customer_name="Existing Customer",
+            customer_phone="01000000001",
+            reserved_at=self.reserved_at,
+            duration_minutes=60,
+            party_size=2,
+        )
+
+        response = self.client.post(
+            "/reservations/",
+            self.reservation_payload(
+                table=self.second_table.pk,
+                customer_name="Second Table Customer",
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Reservation.objects.count(), 2)
+
+    def test_cancelled_reservation_does_not_block_new_reservation(self):
+        Reservation.objects.create(
+            table=self.table,
+            customer_name="Cancelled Customer",
+            customer_phone="01000000001",
+            reserved_at=self.reserved_at,
+            duration_minutes=60,
+            party_size=2,
+            status=Reservation.Status.CANCELLED,
+        )
+
+        response = self.client.post(
+            "/reservations/",
+            self.reservation_payload(customer_name="New Customer"),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Reservation.objects.count(), 2)
+
+    def test_exact_end_start_boundary_does_not_conflict(self):
+        Reservation.objects.create(
+            table=self.table,
+            customer_name="First Customer",
+            customer_phone="01000000001",
+            reserved_at=self.reserved_at,
+            duration_minutes=60,
+            party_size=2,
+        )
+
+        response = self.client.post(
+            "/reservations/",
+            self.reservation_payload(
+                customer_name="Boundary Customer",
+                reserved_at=(
+                    self.reserved_at + timezone.timedelta(minutes=60)
+                ).isoformat(),
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Reservation.objects.count(), 2)
+
+    def test_invalid_table_is_rejected(self):
+        response = self.client.post(
+            "/reservations/",
+            self.reservation_payload(table=999999),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("table", response.data)
+        self.assertEqual(Reservation.objects.count(), 0)
+
+    def test_non_positive_duration_is_rejected(self):
+        response = self.client.post(
+            "/reservations/",
+            self.reservation_payload(duration_minutes=0),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("duration_minutes", response.data)
+        self.assertEqual(Reservation.objects.count(), 0)

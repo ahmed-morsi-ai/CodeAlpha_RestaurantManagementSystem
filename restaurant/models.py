@@ -82,6 +82,7 @@ class Reservation(models.Model):
     customer_name = models.CharField(max_length=120)
     customer_phone = models.CharField(max_length=30)
     reserved_at = models.DateTimeField()
+    duration_minutes = models.PositiveIntegerField(default=60)
     party_size = models.PositiveIntegerField()
     status = models.CharField(
         max_length=20,
