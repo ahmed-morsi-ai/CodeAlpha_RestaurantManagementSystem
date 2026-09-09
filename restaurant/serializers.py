@@ -16,6 +16,33 @@ from .models import (
 )
 
 
+class InventoryItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InventoryItem
+        fields = [
+            "id",
+            "name",
+            "quantity",
+            "unit",
+            "reorder_level",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "name",
+            "unit",
+            "reorder_level",
+            "updated_at",
+        ]
+
+    def validate_quantity(self, value):
+        if value < 0:
+            raise serializers.ValidationError(
+                "quantity must be greater than or equal to 0."
+            )
+        return value
+
+
 class MenuItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = MenuItem

@@ -1045,3 +1045,128 @@ class InventoryDeductionOrderAPITests(APITestCase):
 
         self.assertEqual(self.tomatoes.quantity, Decimal("10.00"))
         self.assertEqual(self.cheese.quantity, Decimal("5.00"))
+
+
+class InventoryAPITests(APITestCase):
+    def setUp(self):
+        self.tomatoes = InventoryItem.objects.create(
+            name="Tomatoes",
+            quantity=Decimal("10.00"),
+            unit="kg",
+            reorder_level=Decimal("2.00"),
+        )
+        self.cheese = InventoryItem.objects.create(
+            name="Cheese",
+            quantity=Decimal("5.00"),
+            unit="kg",
+            reorder_level=Decimal("1.00"),
+        )
+
+    def test_inventory_list_returns_200(self):
+        response = self.client.get("/inventory/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_inventory_list_returns_created_records_with_correct_data(self):
+        response = self.client.get("/inventory/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 2)
+
+        returned_by_id = {
+            item["id"]: item
+            for item in response.data
+        }
+
+        tomatoes = returned_by_id[self.tomatoes.pk]
+        self.assertEqual(tomatoes["name"], "Tomatoes")
+        self.assertEqual(tomatoes["quantity"], "10.00")
+        self.assertEqual(tomatoes["unit"], "kg")
+        self.assertEqual(tomatoes["reorder_level"], "2.00")
+        self.assertIn("updated_at", tomatoes)
+
+    def test_inventory_patch_updates_quantity(self):
+        response = self.client.patch(
+            f"/inventory/{self.tomatoes.pk}/",
+            {"quantity": "7.50"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.tomatoes.refresh_from_db()
+        self.assertEqual(self.tomatoes.quantity, Decimal("7.50"))
+        self.assertEqual(response.data["quantity"], "7.50")
+
+    def test_inventory_patch_rejects_negative_quantity(self):
+        response = self.client.patch(
+            f"/inventory/{self.tomatoes.pk}/",
+            {"quantity": "-1.00"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.tomatoes.refresh_from_db()
+        self.assertEqual(self.tomatoes.quantity, Decimal("10.00"))
+
+    def test_inventory_patch_does_not_modify_another_item(self):
+        response = self.client.patch(
+            f"/inventory/{self.tomatoes.pk}/",
+            {"quantity": "8.25"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.tomatoes.refresh_from_db()
+        self.cheese.refresh_from_db()
+
+        self.assertEqual(self.tomatoes.quantity, Decimal("8.25"))
+        self.assertEqual(self.cheese.quantity, Decimal("5.00"))
+
+    def test_inventory_patch_returns_404_for_unknown_id(self):
+        unknown_id = max(self.tomatoes.pk, self.cheese.pk) + 1000
+
+        response = self.client.patch(
+            f"/inventory/{unknown_id}/",
+            {"quantity": "3.00"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class InventoryOrderRegressionAPITests(APITestCase):
+    def test_order_creation_still_deducts_inventory(self):
+        inventory_item = InventoryItem.objects.create(
+            name="Tomatoes",
+            quantity=Decimal("10.00"),
+            unit="kg",
+            reorder_level=Decimal("2.00"),
+        )
+        menu_item = MenuItem.objects.create(
+            name="Pizza",
+            price=Decimal("12.00"),
+        )
+        MenuItemIngredient.objects.create(
+            menu_item=menu_item,
+            inventory_item=inventory_item,
+            quantity_required=Decimal("0.50"),
+        )
+
+        response = self.client.post(
+            "/orders/",
+            {
+                "items": [
+                    {
+                        "menu_item": menu_item.pk,
+                        "quantity": 2,
+                    }
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        inventory_item.refresh_from_db()
+        self.assertEqual(inventory_item.quantity, Decimal("9.00"))
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(OrderItem.objects.count(), 1)
