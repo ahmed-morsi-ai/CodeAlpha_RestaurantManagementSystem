@@ -814,3 +814,234 @@ class MenuItemIngredientModelTests(TestCase):
         self.assertTrue(
             InventoryItem.objects.filter(pk=self.tomatoes.pk).exists()
         )
+
+class InventoryDeductionOrderAPITests(APITestCase):
+    def setUp(self):
+        self.table = RestaurantTable.objects.create(
+            number=30,
+            capacity=4,
+        )
+        self.pizza = MenuItem.objects.create(
+            name="Pizza",
+            price=Decimal("12.50"),
+            is_available=True,
+        )
+        self.burger = MenuItem.objects.create(
+            name="Burger",
+            price=Decimal("8.50"),
+            is_available=True,
+        )
+        self.tomatoes = InventoryItem.objects.create(
+            name="Tomatoes",
+            quantity=Decimal("10.00"),
+            unit="kg",
+            reorder_level=Decimal("2.00"),
+        )
+        self.cheese = InventoryItem.objects.create(
+            name="Cheese",
+            quantity=Decimal("5.00"),
+            unit="kg",
+            reorder_level=Decimal("1.00"),
+        )
+
+    def order_payload(self, **overrides):
+        payload = {
+            "table": self.table.pk,
+            "items": [
+                {
+                    "menu_item": self.pizza.pk,
+                    "quantity": 2,
+                },
+            ],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_successful_order_deducts_inventory(self):
+        MenuItemIngredient.objects.create(
+            menu_item=self.pizza,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.25"),
+        )
+
+        response = self.client.post(
+            "/orders/",
+            self.order_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(OrderItem.objects.count(), 1)
+
+        self.tomatoes.refresh_from_db()
+        self.assertEqual(self.tomatoes.quantity, Decimal("9.50"))
+
+    def test_order_quantity_is_multiplied_by_required_quantity(self):
+        MenuItemIngredient.objects.create(
+            menu_item=self.pizza,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.25"),
+        )
+
+        response = self.client.post(
+            "/orders/",
+            self.order_payload(
+                items=[
+                    {
+                        "menu_item": self.pizza.pk,
+                        "quantity": 4,
+                    },
+                ],
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        self.tomatoes.refresh_from_db()
+        self.assertEqual(self.tomatoes.quantity, Decimal("9.00"))
+
+    def test_multiple_inventory_dependencies_are_deducted(self):
+        MenuItemIngredient.objects.create(
+            menu_item=self.pizza,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.25"),
+        )
+        MenuItemIngredient.objects.create(
+            menu_item=self.pizza,
+            inventory_item=self.cheese,
+            quantity_required=Decimal("0.10"),
+        )
+
+        response = self.client.post(
+            "/orders/",
+            self.order_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        self.tomatoes.refresh_from_db()
+        self.cheese.refresh_from_db()
+
+        self.assertEqual(self.tomatoes.quantity, Decimal("9.50"))
+        self.assertEqual(self.cheese.quantity, Decimal("4.80"))
+
+    def test_shared_inventory_is_aggregated_across_order_items(self):
+        MenuItemIngredient.objects.create(
+            menu_item=self.pizza,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.20"),
+        )
+        MenuItemIngredient.objects.create(
+            menu_item=self.burger,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.10"),
+        )
+
+        response = self.client.post(
+            "/orders/",
+            self.order_payload(
+                items=[
+                    {
+                        "menu_item": self.pizza.pk,
+                        "quantity": 2,
+                    },
+                    {
+                        "menu_item": self.burger.pk,
+                        "quantity": 1,
+                    },
+                ],
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(OrderItem.objects.count(), 2)
+
+        self.tomatoes.refresh_from_db()
+        self.assertEqual(self.tomatoes.quantity, Decimal("9.50"))
+
+    def test_insufficient_stock_rejects_order_without_changes(self):
+        self.tomatoes.quantity = Decimal("0.25")
+        self.tomatoes.save(update_fields=["quantity"])
+
+        MenuItemIngredient.objects.create(
+            menu_item=self.pizza,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.50"),
+        )
+
+        response = self.client.post(
+            "/orders/",
+            self.order_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("items", response.data)
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertEqual(OrderItem.objects.count(), 0)
+
+        self.tomatoes.refresh_from_db()
+        self.assertEqual(self.tomatoes.quantity, Decimal("0.25"))
+
+    def test_insufficient_later_requirement_rolls_back_earlier_deduction(self):
+        self.tomatoes.quantity = Decimal("1.00")
+        self.tomatoes.save(update_fields=["quantity"])
+
+        self.cheese.quantity = Decimal("0.05")
+        self.cheese.save(update_fields=["quantity"])
+
+        MenuItemIngredient.objects.create(
+            menu_item=self.pizza,
+            inventory_item=self.tomatoes,
+            quantity_required=Decimal("0.50"),
+        )
+        MenuItemIngredient.objects.create(
+            menu_item=self.pizza,
+            inventory_item=self.cheese,
+            quantity_required=Decimal("0.10"),
+        )
+
+        response = self.client.post(
+            "/orders/",
+            self.order_payload(
+                items=[
+                    {
+                        "menu_item": self.pizza.pk,
+                        "quantity": 1,
+                    },
+                ],
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertEqual(OrderItem.objects.count(), 0)
+
+        self.tomatoes.refresh_from_db()
+        self.cheese.refresh_from_db()
+
+        self.assertEqual(self.tomatoes.quantity, Decimal("1.00"))
+        self.assertEqual(self.cheese.quantity, Decimal("0.05"))
+
+    def test_menu_item_without_inventory_requirements_preserves_order_creation(self):
+        response = self.client.post(
+            "/orders/",
+            self.order_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(OrderItem.objects.count(), 1)
+
+        self.tomatoes.refresh_from_db()
+        self.cheese.refresh_from_db()
+
+        self.assertEqual(self.tomatoes.quantity, Decimal("10.00"))
+        self.assertEqual(self.cheese.quantity, Decimal("5.00"))

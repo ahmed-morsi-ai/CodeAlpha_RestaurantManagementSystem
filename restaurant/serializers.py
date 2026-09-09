@@ -1,9 +1,19 @@
+from decimal import Decimal
+
 from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import F
 from rest_framework import serializers
 
-from .models import MenuItem, Order, OrderItem, Reservation
+from .models import (
+    InventoryItem,
+    MenuItem,
+    MenuItemIngredient,
+    Order,
+    OrderItem,
+    Reservation,
+)
 
 
 class MenuItemSerializer(serializers.ModelSerializer):
@@ -122,8 +132,66 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop("items")
+        menu_item_ids = {item_data["menu_item"].pk for item_data in items_data}
+
+        inventory_consumption = {}
+
+        requirements = (
+            MenuItemIngredient.objects.filter(
+                menu_item_id__in=menu_item_ids,
+            )
+            .select_related("inventory_item")
+            .order_by("inventory_item_id")
+        )
+
+        for requirement in requirements:
+            total_required = (
+                Decimal("0")
+                + requirement.quantity_required
+                * sum(
+                    item_data["quantity"]
+                    for item_data in items_data
+                    if item_data["menu_item"].pk == requirement.menu_item_id
+                )
+            )
+
+            existing = inventory_consumption.get(requirement.inventory_item_id)
+            if existing is None:
+                inventory_consumption[requirement.inventory_item_id] = {
+                    "inventory_item": requirement.inventory_item,
+                    "quantity": total_required,
+                }
+            else:
+                existing["quantity"] += total_required
 
         with transaction.atomic():
+            for inventory_id in sorted(inventory_consumption):
+                inventory_data = inventory_consumption[inventory_id]
+                inventory_item = inventory_data["inventory_item"]
+                required_quantity = inventory_data["quantity"]
+
+                updated = (
+                    InventoryItem.objects.filter(
+                        pk=inventory_id,
+                        quantity__gte=required_quantity,
+                    )
+                    .update(
+                        quantity=F("quantity") - required_quantity,
+                    )
+                )
+
+                if updated != 1:
+                    raise serializers.ValidationError(
+                        {
+                            "items": [
+                                (
+                                    "Insufficient inventory for "
+                                    f"{inventory_item.name}."
+                                )
+                            ]
+                        }
+                    )
+
             order = Order.objects.create(**validated_data)
             OrderItem.objects.bulk_create(
                 [
