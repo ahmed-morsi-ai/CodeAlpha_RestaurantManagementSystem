@@ -31,3 +31,4 @@ class InventoryListView(ListAPIView):
 class InventoryDetailView(RetrieveUpdateAPIView):
     queryset = InventoryItem.objects.all()
     serializer_class = InventoryItemSerializer
+    http_method_names = ["get", "patch", "head", "options"]

@@ -1097,6 +1097,29 @@ class InventoryAPITests(APITestCase):
         self.assertEqual(self.tomatoes.quantity, Decimal("7.50"))
         self.assertEqual(response.data["quantity"], "7.50")
 
+    def test_inventory_detail_get_returns_200(self):
+        response = self.client.get(f"/inventory/{self.tomatoes.pk}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], self.tomatoes.pk)
+        self.assertEqual(response.data["quantity"], "10.00")
+
+    def test_inventory_detail_put_returns_405(self):
+        response = self.client.put(
+            f"/inventory/{self.tomatoes.pk}/",
+            {"quantity": "7.50"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_inventory_detail_delete_returns_405(self):
+        response = self.client.delete(
+            f"/inventory/{self.tomatoes.pk}/"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
     def test_inventory_patch_rejects_negative_quantity(self):
         response = self.client.patch(
             f"/inventory/{self.tomatoes.pk}/",
